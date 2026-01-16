@@ -1,0 +1,14 @@
+{
+  "dependencies": [
+    "langchain",
+    "langchain_mistralai",
+    "langchain_community",
+    "langgraph",
+    "pandas",
+    "python-dotenv"
+  ],
+  "graphs": {
+    "shotquality_agent": "./MainAgent.py:full_agent"
+  },
+  "env": "./.env"
+}
