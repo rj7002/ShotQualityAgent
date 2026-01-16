@@ -235,8 +235,8 @@ def agent_node(state, agent, name):
         "messages" : [result],
         "sender" : name
     }
-llm = init_chat_model(model="mistral-small-2506",model_provider='mistralai',api_key=os.getenv("MISTRAL_KEY"), temperature=0.3, timeout=120)
-llm2 = init_chat_model(model="mistral-large-2512",model_provider='mistralai',api_key=os.getenv("MISTRAL_KEY"), temperature=0.3, timeout=120)
+llm = init_chat_model(model="mistral-small-2506",model_provider='mistralai',api_key=os.getenv("LLM_KEY"), temperature=0.3, timeout=120)
+llm2 = init_chat_model(model="mistral-large-2512",model_provider='mistralai',api_key=os.getenv("LLM_KEY"), temperature=0.3, timeout=120)
 loader_agent = create_agent(
     llm, 
     [get_nba_season, get_competition_seasons, get_games, get_player_id, get_team_id, get_full_tracking_data, search_duckduckgo],
