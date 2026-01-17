@@ -2,20 +2,19 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-import pandas as pd
 from langchain.chat_models import init_chat_model
 from langsmith import traceable
-from langchain_core.messages import BaseMessage, FunctionMessage, SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage
 from langchain_community.tools import DuckDuckGoSearchRun
 from langgraph.graph import StateGraph, START,END
 from langgraph.graph.message import add_messages
-from typing import Sequence, TypedDict, Annotated, Union
+from typing import Sequence, TypedDict, Annotated
 from langgraph.prebuilt import ToolNode
 from tools import get_nba_season_f, get_player_id_f, get_team_id_f, get_competition_seasons_f, get_games_f, get_full_tracking_data_f
 from langgraph.checkpoint.memory import InMemorySaver  
 import functools
 from langchain_core.prompts import ChatPromptTemplate
-
+from nba_api.stats.endpoints import PlayerIndex
 load_dotenv()
 
 #LOAD ENVIRONMENT VARIABLES
@@ -43,6 +42,15 @@ def get_player_id(name):
     """Get a player's id using the api from their name"""
     df = get_player_id_f(name)
     return df.to_json()
+
+@tool
+def get_team_name(name,season):
+    """Get a player's team name using nba_api and the start season year"""
+    players = PlayerIndex(season=f"{season}-{str(season+1)[-2:]}").get_data_frames()[0]
+    players['player_name'] = players['FIRST_NAME'] + ' ' + players['LAST_NAME']
+    players['team_name'] = players['TEAM_CITY'] + ' ' + players['TEAM_NAME']
+    matched = players[players['player_name'].str.lower() == name.lower()]
+    return matched['team_name'].iloc[0] if not matched.empty else "Team not found"
 
 @tool
 def get_team_id(name):
@@ -90,7 +98,6 @@ def search_duckduckgo(query: str):
     Use this tool whenever you need to clarify or find additional information about players, teams, or competitions.
     """
     search = DuckDuckGoSearchRun()
-    return search.invoke(query)
     return search.invoke(query)
 
 # SYSTEM_PROMPT = open("system_prompt.txt").read()
@@ -140,6 +147,11 @@ CRITICAL: You have NO tools available. Do NOT attempt to call any tools.
 - If you see an empty JSON object {{}} from get_full_tracking_data, this means NO DATA is available for that game
 - If no data is available, politely inform the user that tracking data is not available for that specific game
 - Suggest they try a different game from the list provided earlier
+
+IMPORTANT: If the user asks for a plot, chart, graph, or any visualization:
+- Tell them you'll generate the visualization code for them
+- Do NOT attempt to create the visualization yourself
+- The system will automatically hand off to the coding assistant
 
 Your job is to analyze player and team performance using this ShotQuality play-by-play data.
 You think like a film-room analyst, not a fan. 
@@ -235,8 +247,8 @@ def agent_node(state, agent, name):
         "messages" : [result],
         "sender" : name
     }
-llm = init_chat_model(model="mistral-small-2506",model_provider='mistralai',api_key=os.getenv("LLM_KEY"), temperature=0.3, timeout=120)
-llm2 = init_chat_model(model="mistral-large-2512",model_provider='mistralai',api_key=os.getenv("LLM_KEY"), temperature=0.3, timeout=120)
+llm = init_chat_model(model="mistral-small-2506",model_provider='mistralai',api_key=os.getenv("MISTRAL_KEY"), temperature=0.3, timeout=120)
+llm2 = init_chat_model(model="mistral-large-2512",model_provider='mistralai',api_key=os.getenv("MISTRAL_KEY"), temperature=0.3, timeout=120)
 loader_agent = create_agent(
     llm, 
     [get_nba_season, get_competition_seasons, get_games, get_player_id, get_team_id, get_full_tracking_data, search_duckduckgo],
@@ -252,6 +264,64 @@ analyzer_agent = create_agent(
 )
 
 analyzer_node = functools.partial(agent_node, agent=analyzer_agent, name="Analyzer")
+
+CODER_PROMPT = """
+You are a Python coding assistant specialized in basketball data visualization.
+
+You will receive shot tracking data from the conversation history (look for ToolMessage from get_full_tracking_data).
+The data is in JSON format with columns like: shot_x, shot_y, made, action_type, period, minutes, seconds, 
+and various tracking features (defender distances, angles, spacing metrics, etc.).
+
+Your task is to write clean, executable Python code that:
+1. Loads the tracking data from JSON (it's already in the conversation as a string)
+2. Converts it to a pandas DataFrame
+3. Creates the requested visualization using matplotlib, seaborn, or plotly
+4. Saves the plot to a file (e.g., 'shot_chart.png')
+
+IMPORTANT GUIDELINES:
+- Start with necessary imports: import pandas as pd, import matplotlib.pyplot as plt, import json, etc.
+- Parse the JSON data from the conversation: df = pd.DataFrame(json.loads(tracking_data_json))
+- Use clear variable names and add helpful comments
+- Make the visualization publication-quality with titles, labels, legends
+- For shot charts, use NBA court dimensions (94 feet x 50 feet, basket at (5.25, 25) and (88.75, 25))
+- Color-code by made/missed shots (green for made, red for missed is conventional)
+- Include a legend and proper axis labels
+- End with plt.savefig('filename.png') and plt.show()
+- Use best practices: proper figure size, DPI, grid styling, etc.
+
+EXAMPLE STRUCTURE:
+```python
+import pandas as pd
+import matplotlib.pyplot as plt
+import json
+
+# Load the tracking data from the JSON string in conversation
+tracking_data_json = '''<JSON_HERE>'''
+df = pd.DataFrame(json.loads(tracking_data_json))
+
+# Create visualization
+fig, ax = plt.subplots(figsize=(12, 8))
+# ... plotting code ...
+plt.title('Shot Chart')
+plt.xlabel('X Position (feet)')
+plt.ylabel('Y Position (feet)')
+plt.legend()
+plt.tight_layout()
+plt.savefig('shot_chart.png', dpi=300)
+plt.show()
+```
+
+Respond ONLY with the Python code, no explanations before or after the code block.
+"""
+
+coder_agent = create_agent(
+    llm2,  # Use the larger model for better code generation
+    tools=[],
+    system_message=CODER_PROMPT
+)
+
+coder_node = functools.partial(agent_node, agent=coder_agent, name="Coder")
+
 from langchain_core.messages import ToolMessage
 
 def router(state):
@@ -286,6 +356,10 @@ def router(state):
     if hasattr(last, "content") and "ERROR" in last.content:
         return "end"
     
+    # If last message is from Coder, end so user can see the code
+    if hasattr(last, "name") and last.name == "Coder":
+        return "end"
+    
     # If last message is from Analyzer (AI response with no tool calls), end for now (user can continue thread)
     if hasattr(last, "name") and last.name == "Analyzer":
         return "end"
@@ -301,7 +375,7 @@ def router(state):
     return "continue"
 
 def followup_router(state):
-    """Route to load new data or analyze existing data based on conversation state"""
+    """Route to load new data, analyze existing data, or visualize data based on conversation state"""
     from langchain_core.messages import HumanMessage, ToolMessage
     
     last = state["messages"][-1]
@@ -334,11 +408,23 @@ def followup_router(state):
     print(f"[ROUTER DEBUG] Message count: {len(state['messages'])}")
     print(f"[ROUTER DEBUG] User query: {content[:100]}")
     
+    # Check for visualization requests
+    visualization_indicators = [
+        "plot", "chart", "graph", "visualize", "visualization", "show me a",
+        "create a plot", "make a chart", "draw", "diagram", "heat map", "heatmap",
+        "shot chart", "scatter", "histogram", "bar chart", "line graph"
+    ]
+    
+    wants_visualization = any(indicator in content_lower for indicator in visualization_indicators)
+    
+    if wants_visualization and has_tracking_data:
+        print("[ROUTER DEBUG] Routing to: visualize (visualization request with data)")
+        return "visualize"
+    
     # Strong indicators that user wants NEW data (not analyzing existing)
     new_data_indicators = [
         "instead", "different", "another", "new", "other",
         "get me", "show me", "load", "fetch", "retrieve", "give me",
-        "lebron", "durant", "giannis", "lakers", "warriors", "celtics"
     ]
     
     # Strong indicators that user wants to ANALYZE existing data
@@ -354,6 +440,7 @@ def followup_router(state):
     
     print(f"[ROUTER DEBUG] Wants new data: {wants_new_data}")
     print(f"[ROUTER DEBUG] Wants analysis: {wants_analysis}")
+    print(f"[ROUTER DEBUG] Wants visualization: {wants_visualization}")
     
     # If user explicitly wants new data, route to loader
     if wants_new_data and not wants_analysis:
@@ -378,17 +465,19 @@ workflow = StateGraph(AgentState)
 
 workflow.add_node("Loader", loader_node)
 workflow.add_node("Analyzer", analyzer_node)
+workflow.add_node("Coder", coder_node)
 tools_input = [get_nba_season, get_competition_seasons, get_games, get_player_id, get_team_id, get_full_tracking_data, search_duckduckgo]
 toolnode = ToolNode(tools_input)
 workflow.add_node("call_tool",toolnode)
 
-# Entry point: decide if this is initial query or follow-up
+# Entry point: decide if this is initial query, follow-up, or visualization request
 workflow.add_conditional_edges(
     START,
     followup_router,
     {
         "load_data": "Loader",
-        "analyze_existing": "Analyzer"
+        "analyze_existing": "Analyzer",
+        "visualize": "Coder"
     }
 )
 
@@ -409,6 +498,13 @@ workflow.add_conditional_edges(
         "continue" : END,
         "call_tool": "call_tool",
         "end" : END
+    }
+)
+workflow.add_conditional_edges(
+    "Coder",
+    router,
+    {
+        "end": END
     }
 )
 workflow.add_conditional_edges(
@@ -433,26 +529,26 @@ workflow.add_conditional_edges(
 
 full_agent = workflow.compile(checkpointer=InMemorySaver())
 
-def print_stream(stream):
-    for s in stream:
-        message = s["messages"][-1]
-        if isinstance(message, tuple):
-            print(message)
-        else:
-            message.pretty_print()
-user_input = input("USER: " )
-while user_input != "exit":
-    inputs = {
-    "messages": [
-        {"role": "user", "content": user_input}
-    ]
-}
-    config = {
-    "configurable": {
-        "thread_id": "1"
-    }
-}
+# def print_stream(stream):
+#     for s in stream:
+#         message = s["messages"][-1]
+#         if isinstance(message, tuple):
+#             print(message)
+#         else:
+#             message.pretty_print()
+# user_input = input("USER: " )
+# while user_input != "exit":
+#     inputs = {
+#     "messages": [
+#         {"role": "user", "content": user_input}
+#     ]
+# }
+#     config = {
+#     "configurable": {
+#         "thread_id": "1"
+#     }
+# }
 
 
-    print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
-    user_input = input("USER: ")
+#     print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
+#     user_input = input("USER: ")
