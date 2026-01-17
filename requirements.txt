@@ -4,6 +4,5 @@ requests
 langchain
 langchain_core
 langchain_community
-langchain_mistralai
 langgraph
 python-dotenv

@@ -18,6 +18,13 @@ def get_nba_season_f(subtract):
     end_year = end_year-subtract
     return f"{start_year}-{str(end_year)[-2:]}"
 
+def get_player_name_f(pid):
+    url = f"https://api.shotquality.com/players/?player_id={pid}"
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    df = pd.DataFrame(data['players'])
+    return df['first_name'].iloc[0] + ' ' + df['last_name'].iloc[0]
+
 def get_player_id_f(name):
     url = f"https://api.shotquality.com/players/?player_name={name}"
     response = requests.get(url, headers=headers)
@@ -110,11 +117,12 @@ def get_games_f(compid, teamid):
        'competition_id',  'home_score',
        'away_score', 'home_dynamic_sq_score', 'away_dynamic_sq_score',
        'home_initial_sq_score', 'away_initial_sq_score', 'is_neutral',
-       'game_status', 'pbp_updated_at','game_descriptors']
-    games = games.drop(columns=dropcols, errors="ignore")
+       'game_status', 'pbp_updated_at','game_descriptors','game_datetime_utc',
+       'home_team_id','away_team_id','competition_season_id']
     games['away_team'] = games['away_team_id'].map(teams)
     games['home_team'] = games['home_team_id'].map(teams)
     games['date'] = pd.to_datetime(games['game_datetime_utc']).dt.strftime('%m-%d-%Y')
+    games = games.drop(columns=dropcols, errors="ignore")
     return games
 
 def get_full_tracking_data_f(gameid, playerid):
@@ -145,6 +153,11 @@ def get_full_tracking_data_f(gameid, playerid):
             return pd.DataFrame()
         
         final_df = pbpdata.copy()
+        defenderids = final_df['Closest Defender ID'].unique()
+        for did in defenderids:
+            defender_name = get_player_name_f(did)
+            final_df.loc[final_df['Closest Defender ID'] == did, 'Closest Defender Name'] = defender_name
+        final_df.drop(columns=['Closest Defender ID'], inplace=True)
         
         # Calculate tracking features if location data is available
         tracking_features_df = None
@@ -163,7 +176,7 @@ def get_full_tracking_data_f(gameid, playerid):
         # Drop unnecessary columns
         dropcols = ['created_at', 'updated_at', 'parent_play_id', 'play_id',
                     'feature_store_top_5', 'shot_taking',
-                    'shooting_bench_direction', 'initial_updated_at']
+                    'shooting_bench_direction', 'initial_updated_at','game_id']
         final_df = final_df.drop(columns=dropcols, errors="ignore")
         
         # Filter out free throws
@@ -172,7 +185,6 @@ def get_full_tracking_data_f(gameid, playerid):
         if final_df.empty:
             print(f"Warning: No valid shot data after processing for game {gameid}.")
             return pd.DataFrame()
-        
         return final_df
     
     except KeyError as e:
