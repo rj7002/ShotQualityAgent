@@ -1,3 +1,5 @@
+<img width="4000" height="1000" alt="image" src="https://github.com/user-attachments/assets/ae54c116-5ef8-4280-9025-bab22740bcd0" />
+
 # ShotQuality Agent
 
 An AI agent system for analyzing NBA shot tracking data using natural language queries. Built with LangGraph and Mistral AI, this multi-agent system retrieves game data from the ShotQuality API, performs basketball analytics, and generates visualization code.
