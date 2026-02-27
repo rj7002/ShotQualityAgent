@@ -529,26 +529,26 @@ workflow.add_conditional_edges(
 
 full_agent = workflow.compile(checkpointer=InMemorySaver())
 
-def print_stream(stream):
-    for s in stream:
-        message = s["messages"][-1]
-        if isinstance(message, tuple):
-            print(message)
-        else:
-            message.pretty_print()
-user_input = input("USER: " )
-while user_input != "exit":
-    inputs = {
-    "messages": [
-        {"role": "user", "content": user_input}
-    ]
-}
-    config = {
-    "configurable": {
-        "thread_id": "1"
-    }
-}
+# def print_stream(stream):
+#     for s in stream:
+#         message = s["messages"][-1]
+#         if isinstance(message, tuple):
+#             print(message)
+#         else:
+#             message.pretty_print()
+# user_input = input("USER: " )
+# while user_input != "exit":
+#     inputs = {
+#     "messages": [
+#         {"role": "user", "content": user_input}
+#     ]
+# }
+#     config = {
+#     "configurable": {
+#         "thread_id": "1"
+#     }
+# }
 
 
-    print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
-    user_input = input("USER: ")
+#     print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
+#     user_input = input("USER: ")
