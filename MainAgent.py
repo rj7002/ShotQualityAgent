@@ -247,8 +247,8 @@ def agent_node(state, agent, name):
         "messages" : [result],
         "sender" : name
     }
-llm = init_chat_model(model="mistral-small-2506",model_provider='mistralai',api_key=os.getenv("MISTRAL_KEY"), temperature=0.3, timeout=120)
-llm2 = init_chat_model(model="mistral-large-2512",model_provider='mistralai',api_key=os.getenv("MISTRAL_KEY"), temperature=0.3, timeout=120)
+llm = init_chat_model(model=os.getenv("SMALL_MODEL_NAME"),model_provider=os.getenv("MODEL_PROVIDER"),api_key=os.getenv("LLM_KEY"), temperature=0.3, timeout=120)
+llm2 = init_chat_model(model=os.getenv("LARGE_MODEL_NAME"),model_provider=os.getenv("MODEL_PROVIDER"),api_key=os.getenv("LLM_KEY"), temperature=0.3, timeout=120)
 loader_agent = create_agent(
     llm, 
     [get_nba_season, get_competition_seasons, get_games, get_player_id, get_team_id, get_full_tracking_data, search_duckduckgo],
@@ -529,26 +529,26 @@ workflow.add_conditional_edges(
 
 full_agent = workflow.compile(checkpointer=InMemorySaver())
 
-# def print_stream(stream):
-#     for s in stream:
-#         message = s["messages"][-1]
-#         if isinstance(message, tuple):
-#             print(message)
-#         else:
-#             message.pretty_print()
-# user_input = input("USER: " )
-# while user_input != "exit":
-#     inputs = {
-#     "messages": [
-#         {"role": "user", "content": user_input}
-#     ]
-# }
-#     config = {
-#     "configurable": {
-#         "thread_id": "1"
-#     }
-# }
+def print_stream(stream):
+    for s in stream:
+        message = s["messages"][-1]
+        if isinstance(message, tuple):
+            print(message)
+        else:
+            message.pretty_print()
+user_input = input("USER: " )
+while user_input != "exit":
+    inputs = {
+    "messages": [
+        {"role": "user", "content": user_input}
+    ]
+}
+    config = {
+    "configurable": {
+        "thread_id": "1"
+    }
+}
 
 
-#     print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
-#     user_input = input("USER: ")
+    print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
+    user_input = input("USER: ")
