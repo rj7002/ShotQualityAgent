@@ -1,3 +1,5 @@
+import os
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -15,11 +17,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 import functools
 from langchain_core.prompts import ChatPromptTemplate
 from nba_api.stats.endpoints import PlayerIndex
+import pandas as pd
+
 load_dotenv()
 
 #LOAD ENVIRONMENT VARIABLES
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
+# os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
 os.environ["LANGCHAIN_PROJECT"] = "shotquality-agent"
 
 #CREATE TOOLS
@@ -80,6 +83,18 @@ def get_full_tracking_data(gameid,playerid):
     """Get full tracking data using gameid"""
     df = get_full_tracking_data_f(gameid,playerid)
     return df.to_json()
+
+@tool 
+def get_betting_data(teamName):
+    """Get SQ betting data for a team using the temporary csv dataset we have in the repo
+    teamName should be in the format "Los Angeles Lakers", "Miami Heat", etc.
+    """
+    df = pd.read_csv("/Users/ryan/ShotQualityAgent/nba_lqt_export.csv")
+    team_data = df[df["team"] == teamName]
+    if team_data.empty:
+        return "No betting data found for that team"
+    else:
+        return team_data.head(50).to_json()
 
 @tool("search_duckduckgo")
 def search_duckduckgo(query: str):
@@ -322,6 +337,35 @@ coder_agent = create_agent(
 
 coder_node = functools.partial(agent_node, agent=coder_agent, name="Coder")
 
+BETTING_ANALYZER_PROMPT = """
+You are ShotQuality Betting Analyst AI, a professional basketball betting analytics assistant.
+
+You have access to the get_betting_data tool to retrieve ShotQuality betting metrics for NBA teams.
+
+WORKFLOW:
+1. Call get_betting_data(teamName) to retrieve the team's betting data.
+   teamName must be in full format, e.g. "Los Angeles Lakers", "Miami Heat", "Golden State Warriors".
+   If the user's query does not clearly name a team, ask for clarification before calling the tool.
+2. Once you have the data, analyze it and respond to the user.
+
+ANALYSIS GUIDELINES:
+- Analyze the betting metrics thoroughly and provide actionable insights
+- Use specific numbers and statistics from the data to back up your points
+- Focus on trends, patterns, and anomalies relevant to the user's question
+- Only address what the user asked about — do not volunteer unrequested information
+- If get_betting_data returns no data, inform the user and suggest verifying the team name format
+
+After get_betting_data completes, analyze the results and respond. Do not call further tools.
+"""
+
+betting_analyzer_agent = create_agent(
+    llm2,
+    tools=[get_betting_data],
+    system_message=BETTING_ANALYZER_PROMPT
+)
+
+betting_analyzer_node = functools.partial(agent_node, agent=betting_analyzer_agent, name="BettingAnalyzer")
+
 from langchain_core.messages import ToolMessage
 
 def router(state):
@@ -334,6 +378,9 @@ def router(state):
             return "analyze"
         
         # If we got games data, check if we need to wait for user selection
+        if hasattr(last, "name") and last.name == "get_betting_data":
+            return "analyze_betting"
+
         if hasattr(last, "name") and last.name == "get_games":
             # Continue to loader so it can present games to user
             return "continue"
@@ -363,6 +410,10 @@ def router(state):
     # If last message is from Analyzer (AI response with no tool calls), end for now (user can continue thread)
     if hasattr(last, "name") and last.name == "Analyzer":
         return "end"
+
+    # If last message is from BettingAnalyzer, end
+    if hasattr(last, "name") and last.name == "BettingAnalyzer":
+        return "end"
     
     # If message is from Loader asking for game selection, wait for user response
     if hasattr(last, "name") and last.name == "Loader":
@@ -371,102 +422,77 @@ def router(state):
             # End and wait for user input
             return "end"
 
-    # If we have content but no tool calls, continue
-    return "continue"
+    # If we have content but no tool calls, end the turn and wait for user input
+    return "end"
+
+def classify_intent(user_message: str, has_tracking_data: bool, has_betting_data: bool) -> str:
+    """Use the small LLM to reason about the user's intent and return a route."""
+    prompt = f"""You are a routing assistant for an NBA analytics chatbot. Based on the user's message and current session state, choose the single best route.
+
+Session state:
+- Shot tracking data is already loaded: {has_tracking_data}
+- Betting data is already loaded: {has_betting_data}
+
+User message: "{user_message}"
+
+Routes:
+- load_data: User wants to load shot tracking data for a new player or game
+- analyze_existing: User wants to analyze or ask questions about the already-loaded shot tracking data
+- visualize: User wants a chart, plot, graph, or any visualization of tracking data
+- betting: User wants betting analysis, odds, spreads, lines, or any betting-related information for a team
+- load_data: Default if the intent is unclear
+
+Respond with ONLY the route name — one of: load_data, analyze_existing, visualize, betting. No other text."""
+
+    response = llm.invoke(prompt)
+    route = response.content.strip().lower().strip('"').strip("'")
+    valid = {"load_data", "analyze_existing", "visualize", "betting"}
+    return route if route in valid else "load_data"
 
 def followup_router(state):
-    """Route to load new data, analyze existing data, or visualize data based on conversation state"""
+    """Route to load new data, analyze existing data, visualize, or betting analysis."""
     from langchain_core.messages import HumanMessage, ToolMessage
-    
+
     last = state["messages"][-1]
-    
+
     if not isinstance(last, HumanMessage):
         return "end"
-    
+
     # Handle content being either string or list
     content = last.content if isinstance(last.content, str) else str(last.content)
-    content_lower = content.lower()
     
-    # Check if previous message was asking for game selection
+    has_tracking_data = any(
+        isinstance(msg, ToolMessage) and msg.name == "get_full_tracking_data"
+        for msg in state["messages"]
+    )
+    has_betting_data = any(
+        isinstance(msg, ToolMessage) and msg.name == "get_betting_data"
+        for msg in state["messages"]
+    )
+
+    # Check if previous message was asking for game selection — structural check, not intent
     if len(state["messages"]) >= 2:
         prev_msg = state["messages"][-2]
         if hasattr(prev_msg, "content"):
             prev_content = prev_msg.content if isinstance(prev_msg.content, str) else str(prev_msg.content)
             if "which game" in prev_content.lower() or "game number" in prev_content.lower():
-                # User is responding to game selection prompt
                 print("[ROUTER DEBUG] Routing to: load_data (game selection response)")
                 return "load_data"
-    
-    # Check if we already have tracking data in the conversation
-    has_tracking_data = any(
-        isinstance(msg, ToolMessage) and msg.name == "get_full_tracking_data" 
-        for msg in state["messages"]
-    )
-    
-    # Debug output
+
+    route = classify_intent(content, has_tracking_data, has_betting_data)
     print(f"\n[ROUTER DEBUG] Has tracking data: {has_tracking_data}")
-    print(f"[ROUTER DEBUG] Message count: {len(state['messages'])}")
+    print(f"[ROUTER DEBUG] Has betting data: {has_betting_data}")
     print(f"[ROUTER DEBUG] User query: {content[:100]}")
-    
-    # Check for visualization requests
-    visualization_indicators = [
-        "plot", "chart", "graph", "visualize", "visualization", "show me a",
-        "create a plot", "make a chart", "draw", "diagram", "heat map", "heatmap",
-        "shot chart", "scatter", "histogram", "bar chart", "line graph"
-    ]
-    
-    wants_visualization = any(indicator in content_lower for indicator in visualization_indicators)
-    
-    if wants_visualization and has_tracking_data:
-        print("[ROUTER DEBUG] Routing to: visualize (visualization request with data)")
-        return "visualize"
-    
-    # Strong indicators that user wants NEW data (not analyzing existing)
-    new_data_indicators = [
-        "instead", "different", "another", "new", "other",
-        "get me", "show me", "load", "fetch", "retrieve", "give me",
-    ]
-    
-    # Strong indicators that user wants to ANALYZE existing data
-    analyze_indicators = [
-        "how did", "what about", "tell me more", "explain", "describe",
-        "why", "when", "where", "his three", "his defense", "his shooting",
-        "the defender", "the data", "these shots", "this game"
-    ]
-    
-    # Check for strong signals
-    wants_new_data = any(indicator in content_lower for indicator in new_data_indicators)
-    wants_analysis = any(indicator in content_lower for indicator in analyze_indicators)
-    
-    print(f"[ROUTER DEBUG] Wants new data: {wants_new_data}")
-    print(f"[ROUTER DEBUG] Wants analysis: {wants_analysis}")
-    print(f"[ROUTER DEBUG] Wants visualization: {wants_visualization}")
-    
-    # If user explicitly wants new data, route to loader
-    if wants_new_data and not wants_analysis:
-        print("[ROUTER DEBUG] Routing to: load_data (explicit new data request)")
-        return "load_data"
-    
-    # If we have tracking data and user wants analysis, route to analyzer
-    if has_tracking_data and wants_analysis:
-        print("[ROUTER DEBUG] Routing to: analyze_existing (follow-up analysis)")
-        return "analyze_existing"
-    
-    # Default: if we have tracking data and it's ambiguous, analyze existing
-    # Otherwise load new data
-    if has_tracking_data and not wants_new_data:
-        print("[ROUTER DEBUG] Routing to: analyze_existing (default with data)")
-        return "analyze_existing"
-    
-    print("[ROUTER DEBUG] Routing to: load_data (default - no data or new request)")
-    return "load_data"
+    print(f"[ROUTER DEBUG] LLM classified route: {route}")
+    return route
 
 workflow = StateGraph(AgentState)
 
 workflow.add_node("Loader", loader_node)
 workflow.add_node("Analyzer", analyzer_node)
 workflow.add_node("Coder", coder_node)
-tools_input = [get_nba_season, get_competition_seasons, get_games, get_player_id, get_team_id, get_full_tracking_data, search_duckduckgo]
+workflow.add_node("BettingAnalyzer", betting_analyzer_node)
+tools_input = [get_nba_season, get_competition_seasons, get_games, get_player_id, get_team_id, get_full_tracking_data, search_duckduckgo, get_betting_data]
 toolnode = ToolNode(tools_input)
 workflow.add_node("call_tool",toolnode)
 
@@ -477,7 +503,8 @@ workflow.add_conditional_edges(
     {
         "load_data": "Loader",
         "analyze_existing": "Analyzer",
-        "visualize": "Coder"
+        "visualize": "Coder",
+        "betting": "BettingAnalyzer"
     }
 )
 
@@ -513,6 +540,16 @@ workflow.add_conditional_edges(
     {
         "continue": "Loader",
         "analyze": "Analyzer",
+        "analyze_betting": "BettingAnalyzer",
+        "end": END
+    }
+)
+
+workflow.add_conditional_edges(
+    "BettingAnalyzer",
+    router,
+    {
+        "call_tool": "call_tool",
         "end": END
     }
 )
@@ -529,26 +566,26 @@ workflow.add_conditional_edges(
 
 full_agent = workflow.compile(checkpointer=InMemorySaver())
 
-# def print_stream(stream):
-#     for s in stream:
-#         message = s["messages"][-1]
-#         if isinstance(message, tuple):
-#             print(message)
-#         else:
-#             message.pretty_print()
-# user_input = input("USER: " )
-# while user_input != "exit":
-#     inputs = {
-#     "messages": [
-#         {"role": "user", "content": user_input}
-#     ]
-# }
-#     config = {
-#     "configurable": {
-#         "thread_id": "1"
-#     }
-# }
+def print_stream(stream):
+    for s in stream:
+        message = s["messages"][-1]
+        if isinstance(message, tuple):
+            print(message)
+        else:
+            message.pretty_print()
+user_input = input("USER: " )
+while user_input != "exit":
+    inputs = {
+    "messages": [
+        {"role": "user", "content": user_input}
+    ]
+}
+    config = {
+    "configurable": {
+        "thread_id": "1"
+    }
+}
 
 
-#     print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
-#     user_input = input("USER: ")
+    print_stream(full_agent.stream(inputs, stream_mode="values", config=config))
+    user_input = input("USER: ")
